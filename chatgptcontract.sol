@@ -3,8 +3,12 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract LPManagement is Ownable, Pausable {
+contract LPManagement is Ownable(address(this)), Pausable {
+    // Aggregator for ETH-USD price feed
+    AggregatorV3Interface internal ethUsdPriceFeed;
+
     // Struct to store Limited Partner data
     struct LPData {
         uint256 commitmentAmount;  // Total commitment by the LP
@@ -33,7 +37,23 @@ contract LPManagement is Ownable, Pausable {
     event CashCallCreated(uint256 indexed callId, uint256 amount, uint256 callInterval);
     event CashCallExecuted(uint256 indexed callId);
     event PenaltyApplied(address indexed lp, uint256 penaltyAmount);
+    event TranchesForfeited(address indexed lp);
+    event AccessRevoked(address indexed lp);
     event Withdrawal(address indexed to, uint256 amount);
+
+    constructor(address _aggregatorAddress) {
+        require(_aggregatorAddress != address(0), "Invalid aggregator address");
+        ethUsdPriceFeed = AggregatorV3Interface(_aggregatorAddress);
+    }
+
+    // Get ETH-USD exchange rate
+    function getETHUSDCExchangeRate() public view returns (uint256) {
+        (, int256 ethUsdPrice, , , ) = ethUsdPriceFeed.latestRoundData();
+        require(ethUsdPrice > 0, "Invalid ETH/USD price data");
+
+        // Chainlink price feeds typically return prices with 8 decimals.
+        return uint256(ethUsdPrice) * 1e10; // Adjust to 18 decimals for consistency
+    }
 
     // Set commitment for a Limited Partner (Admin only)
     function setCommitment(address lp, uint256 amount, uint8 totalTranches) external onlyOwner whenNotPaused {
@@ -96,14 +116,28 @@ contract LPManagement is Ownable, Pausable {
     }
 
     // Apply penalties for missed deadlines
-    function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount) external onlyOwner whenNotPaused {
+    function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount, bool revokeAccess) external onlyOwner whenNotPaused {
         LPData storage lpInfo = lpData[lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
         require(lpInfo.trancheCommitments[tranche] > 0, "Invalid tranche");
 
-        lpInfo.remainingCommitment += penaltyAmount;
+        // Forfeit prior tranches
+        for (uint8 i = 0; i < tranche; i++) {
+            lpInfo.trancheCommitments[i] = 0;
+            lpInfo.tranchePayments[i] = 0;
+        }
+        emit TranchesForfeited(lp);
 
+        // Apply late fee
+        lpInfo.remainingCommitment += penaltyAmount;
         emit PenaltyApplied(lp, penaltyAmount);
+
+        // Revoke access if applicable
+        if (revokeAccess) {
+            lpInfo.commitmentAmount = 0;
+            lpInfo.remainingCommitment = 0;
+            emit AccessRevoked(lp);
+        }
     }
 
     // Check if a cash call is due
