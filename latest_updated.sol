@@ -3,9 +3,10 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract LPManagement is Ownable(address(this)), Pausable {
+contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     // Aggregator for ETH-USD price feed
     AggregatorV3Interface internal ethUsdPriceFeed;
 
@@ -90,7 +91,7 @@ contract LPManagement is Ownable(address(this)), Pausable {
     }
 
     // Make a payment as an LP
-    function makePayment(uint8 tranche) external payable whenNotPaused {
+    function makePayment(uint8 tranche) external payable whenNotPaused nonReentrant {
         LPData storage lp = lpData[msg.sender];
         require(lp.commitmentAmount > 0, "You are not an LP");
         require(lp.trancheCommitments[tranche] > 0, "Invalid tranche");
@@ -157,7 +158,7 @@ contract LPManagement is Ownable(address(this)), Pausable {
     }
 
     // Withdraw Ether from the contract (Admin only)
-    function withdraw(uint256 amount) external onlyOwner whenNotPaused {
+    function withdraw(uint256 amount) external onlyOwner whenNotPaused nonReentrant {
         require(amount <= address(this).balance, "Insufficient balance in contract");
         payable(owner()).transfer(amount);
         emit Withdrawal(owner(), amount);
