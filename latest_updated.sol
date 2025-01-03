@@ -15,9 +15,16 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 commitmentAmount;  // Total commitment by the LP
         uint256 totalPaid;         // Amount already paid
         uint256 remainingCommitment; // Remaining amount to be paid
-        mapping(uint8 => uint256) trancheCommitments; // Commitment amount per tranche
         mapping(uint8 => uint256) tranchePayments;    // Payments made per tranche
     }
+
+    // Struct to store tranche details
+    struct TrancheDetails {
+        uint256 percentage; // Percentage of the commitment for this tranche
+        uint256 period;     // Period (in seconds) after which this tranche is due
+    }
+
+    uint256 minCommitmentAmountUSD = 1000 * 10**18;
 
     // Struct to store Cash Call data
     struct CashCall {
@@ -28,12 +35,13 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
 
     // Mappings
     mapping(address => LPData) public lpData;         // LP data by address
+    mapping(address => TrancheDetails[]) public lpTranches;   // Tranche details per LP
     mapping(uint256 => CashCall) public cashCalls;    // Cash calls by ID
 
     uint256 public totalCashCalls; // Total number of cash calls created
 
     // Events
-    event CommitmentSet(address indexed lp, uint256 amount);
+    event CommitmentSet(address indexed lp, uint256 amountETH);
     event PaymentMade(address indexed lp, uint256 amount, uint8 tranche);
     event CashCallCreated(uint256 indexed callId, uint256 amount, uint256 callInterval);
     event CashCallExecuted(uint256 indexed callId);
@@ -57,22 +65,39 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Set commitment for a Limited Partner (Admin only)
-    function setCommitment(address lp, uint256 amount, uint8 totalTranches) external onlyOwner whenNotPaused {
+    function setCommitment(
+        address lp,
+        uint256 amountETH,
+        uint8[] memory percentages,
+        uint256[] memory periods
+    ) external onlyOwner whenNotPaused {
         require(lp != address(0), "Invalid LP address");
-        require(amount > 0, "Commitment amount must be greater than zero");
-        require(totalTranches > 0, "Total tranches must be greater than zero");
+        require(amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD, "Commitment amount must be greater than minimum amount");
+        require(percentages.length > 0, "Percentages must not be empty");
+        require(percentages.length == periods.length, "Percentages and periods must match");
 
+        uint256 totalPercentage;
+        for (uint8 i = 0; i < percentages.length; i++) {
+            totalPercentage += percentages[i];
+        }
+        require(totalPercentage == 100, "Total percentage must equal 100");
+
+        // Initialize LP data
         LPData storage lpInfo = lpData[lp];
-        lpInfo.commitmentAmount = amount;
+        lpInfo.commitmentAmount = amountETH;
         lpInfo.totalPaid = 0;
-        lpInfo.remainingCommitment = amount;
+        lpInfo.remainingCommitment = amountETH;
 
-        uint256 trancheAmount = amount / totalTranches;
-        for (uint8 i = 0; i < totalTranches; i++) {
-            lpInfo.trancheCommitments[i] = trancheAmount;
+        // Set tranche details
+        delete lpTranches[lp]; // Reset existing tranche details for the LP
+        for (uint8 i = 0; i < percentages.length; i++) {
+            lpTranches[lp].push(TrancheDetails({
+                percentage: percentages[i],
+                period: block.timestamp + periods[i] * 86400
+            }));
         }
 
-        emit CommitmentSet(lp, amount);
+        emit CommitmentSet(lp, amountETH);
     }
 
     // Create a new cash call (Admin only)
@@ -94,8 +119,13 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     function makePayment(uint8 tranche) external payable whenNotPaused nonReentrant {
         LPData storage lp = lpData[msg.sender];
         require(lp.commitmentAmount > 0, "You are not an LP");
-        require(lp.trancheCommitments[tranche] > 0, "Invalid tranche");
-        require(lp.trancheCommitments[tranche] >= lp.tranchePayments[tranche] + msg.value, "Overpayment not allowed");
+        require(tranche < lpTranches[msg.sender].length, "Invalid tranche");
+
+        TrancheDetails memory trancheDetails = lpTranches[msg.sender][tranche];
+        uint256 trancheCommitment = (lp.commitmentAmount * trancheDetails.percentage) / 100;
+
+        require(lp.tranchePayments[tranche] + msg.value <= trancheCommitment, "Overpayment not allowed");
+        require(block.timestamp >= trancheDetails.period, "Tranche not yet due");
 
         lp.totalPaid += msg.value;
         lp.remainingCommitment -= msg.value;
@@ -120,11 +150,9 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount, bool revokeAccess) external onlyOwner whenNotPaused {
         LPData storage lpInfo = lpData[lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
-        require(lpInfo.trancheCommitments[tranche] > 0, "Invalid tranche");
 
         // Forfeit prior tranches
         for (uint8 i = 0; i < tranche; i++) {
-            lpInfo.trancheCommitments[i] = 0;
             lpInfo.tranchePayments[i] = 0;
         }
         emit TranchesForfeited(lp);
@@ -139,6 +167,11 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
             lpInfo.remainingCommitment = 0;
             emit AccessRevoked(lp);
         }
+    }
+
+    function setMinCommitmentAmountUSD(uint256 minAmount) external onlyOwner whenNotPaused {
+        require(minAmount > 0, "Minimum commitment amount must be greater than zero");
+        minCommitmentAmountUSD = minAmount;
     }
 
     // Check if a cash call is due
