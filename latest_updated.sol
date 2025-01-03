@@ -24,7 +24,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 period;     // Period (in seconds) after which this tranche is due
     }
 
-    uint256 minCommitmentAmountUSD = 1000 * 10**18;
+    uint256 public minCommitmentAmountUSD = 1000 * 10**18;
 
     // Struct to store Cash Call data
     struct CashCall {
@@ -72,7 +72,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256[] memory periods
     ) external onlyOwner whenNotPaused {
         require(lp != address(0), "Invalid LP address");
-        require(amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD, "Commitment amount must be greater than minimum amount");
+        require(amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
         require(percentages.length > 0, "Percentages must not be empty");
         require(percentages.length == periods.length, "Percentages and periods must match");
 
@@ -93,7 +93,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         for (uint8 i = 0; i < percentages.length; i++) {
             lpTranches[lp].push(TrancheDetails({
                 percentage: percentages[i],
-                period: block.timestamp + periods[i] * 86400
+                period: block.timestamp + (periods[i] * 1 days)
             }));
         }
 
@@ -125,7 +125,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 trancheCommitment = (lp.commitmentAmount * trancheDetails.percentage) / 100;
 
         require(lp.tranchePayments[tranche] + msg.value <= trancheCommitment, "Overpayment not allowed");
-        require(block.timestamp >= trancheDetails.period, "Tranche not yet due");
+        require(block.timestamp <= trancheDetails.period, "Tranche date was expired");
 
         lp.totalPaid += msg.value;
         lp.remainingCommitment -= msg.value;
@@ -169,9 +169,22 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         }
     }
 
+    // Set the minimun amount of commitment
     function setMinCommitmentAmountUSD(uint256 minAmount) external onlyOwner whenNotPaused {
         require(minAmount > 0, "Minimum commitment amount must be greater than zero");
         minCommitmentAmountUSD = minAmount;
+    }
+
+    // Get all tranches payments status
+    function getAllTranchePayments(address lp) external view returns (uint256[] memory) {
+        uint256 trancheLength = lpTranches[lp].length; // Get the number of tranches
+        uint256[] memory payments = new uint256[](trancheLength); // Create a temporary array to hold payments
+
+        for (uint8 i = 0; i < trancheLength; i++) {
+            payments[i] = lpData[lp].tranchePayments[i];
+        }
+
+        return payments;
     }
 
     // Check if a cash call is due
