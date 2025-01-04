@@ -100,6 +100,28 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         emit CommitmentSet(lp, amountETH);
     }
 
+    // Get all tranches periods and amounts
+    function getLPTranches(address lp) external view returns (uint256[] memory tranchePeriods, uint256[] memory trancheAmounts) {
+        TrancheDetails[] storage tranches = lpTranches[lp];
+        LPData storage lpInfo = lpData[lp];
+        require(lpInfo.commitmentAmount > 0, "Invalid LP");
+
+        uint256 trancheCount = tranches.length;
+
+        tranchePeriods = new uint256[](trancheCount);
+        trancheAmounts = new uint256[](trancheCount);
+
+        for (uint8 i = 0; i < trancheCount; i++) {
+            // Get tranche period
+            tranchePeriods[i] = tranches[i].period;
+
+            // Calculate tranche amount based on the percentage
+            trancheAmounts[i] = (lpInfo.commitmentAmount * tranches[i].percentage) / 100;
+        }
+
+        return (tranchePeriods, trancheAmounts);
+    }
+
     // Create a new cash call (Admin only)
     function createCashCall(uint256 amount, uint256 callInterval) external onlyOwner whenNotPaused {
         require(amount > 0, "Cash call amount must be greater than zero");
@@ -175,16 +197,18 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         minCommitmentAmountUSD = minAmount;
     }
 
-    // Get all tranches payments status
-    function getAllTranchePayments(address lp) external view returns (uint256[] memory) {
-        uint256 trancheLength = lpTranches[lp].length; // Get the number of tranches
-        uint256[] memory payments = new uint256[](trancheLength); // Create a temporary array to hold payments
+    // Get next tranche data
+    function getNextTranche(address lp) external view returns (uint256 nextPercentage, uint256 nextPeriod) {
+        TrancheDetails[] storage tranches = lpTranches[lp];
+        require(tranches.length > 0, "No tranches set for this LP");
 
-        for (uint8 i = 0; i < trancheLength; i++) {
-            payments[i] = lpData[lp].tranchePayments[i];
+        for (uint8 i = 0; i < tranches.length; i++) {
+            if (block.timestamp < tranches[i].period) {
+                return (tranches[i].percentage, tranches[i].period);
+            }
         }
 
-        return payments;
+        revert("No upcoming tranche found");
     }
 
     // Check if a cash call is due
