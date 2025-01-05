@@ -21,7 +21,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     // Struct to store tranche details
     struct TrancheDetails {
         uint256 percentage; // Percentage of the commitment for this tranche
-        uint256 period;     // Period (in seconds) after which this tranche is due
+        uint256 deadline;     // Period (in seconds) after which this tranche is due
     }
 
     uint256 public minCommitmentAmountUSD = 1000 * 10**18;
@@ -93,7 +93,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         for (uint8 i = 0; i < percentages.length; i++) {
             lpTranches[lp].push(TrancheDetails({
                 percentage: percentages[i],
-                period: block.timestamp + (periods[i] * 1 days)
+                deadline: block.timestamp + (periods[i] * 1 days)
             }));
         }
 
@@ -101,25 +101,25 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Get all tranches periods and amounts
-    function getLPTranches(address lp) external view returns (uint256[] memory tranchePeriods, uint256[] memory trancheAmounts) {
+    function getLPTranches(address lp) external view returns (uint256[] memory trancheDeadlines, uint256[] memory trancheAmounts) {
         TrancheDetails[] storage tranches = lpTranches[lp];
         LPData storage lpInfo = lpData[lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
 
         uint256 trancheCount = tranches.length;
 
-        tranchePeriods = new uint256[](trancheCount);
+        trancheDeadlines = new uint256[](trancheCount);
         trancheAmounts = new uint256[](trancheCount);
 
         for (uint8 i = 0; i < trancheCount; i++) {
             // Get tranche period
-            tranchePeriods[i] = tranches[i].period;
+            trancheDeadlines[i] = tranches[i].deadline;
 
             // Calculate tranche amount based on the percentage
             trancheAmounts[i] = (lpInfo.commitmentAmount * tranches[i].percentage) / 100;
         }
 
-        return (tranchePeriods, trancheAmounts);
+        return (trancheDeadlines, trancheAmounts);
     }
 
     // Create a new cash call (Admin only)
@@ -147,7 +147,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 trancheCommitment = (lp.commitmentAmount * trancheDetails.percentage) / 100;
 
         require(lp.tranchePayments[tranche] + msg.value <= trancheCommitment, "Overpayment not allowed");
-        require(block.timestamp <= trancheDetails.period, "Tranche date was expired");
+        require(block.timestamp <= trancheDetails.deadline, "Tranche date was expired");
 
         lp.totalPaid += msg.value;
         lp.remainingCommitment -= msg.value;
@@ -198,13 +198,13 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Get next tranche data
-    function getNextTranche(address lp) external view returns (uint256 nextPercentage, uint256 nextPeriod) {
+    function getNextTranche(address lp) external view returns (uint256 nextPercentage, uint256 nextDeadline) {
         TrancheDetails[] storage tranches = lpTranches[lp];
         require(tranches.length > 0, "No tranches set for this LP");
 
         for (uint8 i = 0; i < tranches.length; i++) {
-            if (block.timestamp < tranches[i].period) {
-                return (tranches[i].percentage, tranches[i].period);
+            if (block.timestamp < tranches[i].deadline) {
+                return (tranches[i].percentage, tranches[i].deadline);
             }
         }
 
