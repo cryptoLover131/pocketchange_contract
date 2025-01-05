@@ -15,6 +15,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 commitmentAmount;  // Total commitment by the LP
         uint256 totalPaid;         // Amount already paid
         uint256 remainingCommitment; // Remaining amount to be paid
+        uint256 commitmentPeriod; // Commitment Period
         mapping(uint8 => uint256) tranchePayments;    // Payments made per tranche
     }
 
@@ -87,7 +88,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         lpInfo.commitmentAmount = amountETH;
         lpInfo.totalPaid = 0;
         lpInfo.remainingCommitment = amountETH;
-
+        lpInfo.commitmentPeriod = periods[periods.length -1];
         // Set tranche details
         delete lpTranches[lp]; // Reset existing tranche details for the LP
         for (uint8 i = 0; i < percentages.length; i++) {
