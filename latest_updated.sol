@@ -225,6 +225,8 @@ contract LPManagement is Pausable, ReentrancyGuard {
 
         address oldAdmin = defaultAdmin;
         defaultAdmin = _newDefaultAdmin;
+        
+        addAdmin(_newDefaultAdmin);
 
         emit DefaultAdminChanged(oldAdmin, _newDefaultAdmin);
     }
