@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
+contract LPManagement is AccessControl, Pausable, ReentrancyGuard {
+    // Define an admin role identifier
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     // Aggregator for ETH-USD price feed
     AggregatorV3Interface internal ethUsdPriceFeed;
 
@@ -50,10 +52,18 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     event TranchesForfeited(address indexed lp);
     event AccessRevoked(address indexed lp);
     event Withdrawal(address indexed to, uint256 amount);
+    event AdminAdded(address indexed account);
+    event AdminRemoved(address indexed account);
 
     constructor(address _aggregatorAddress) {
         require(_aggregatorAddress != address(0), "Invalid aggregator address");
         ethUsdPriceFeed = AggregatorV3Interface(_aggregatorAddress);
+
+        // Grant the deployer the admin role
+        _grantRole(ADMIN_ROLE, msg.sender);
+
+        // Grant the deployer the default admin role, which allows managing roles
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     // Get ETH-USD exchange rate
@@ -71,7 +81,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
         uint256 amountETH,
         uint8[] memory percentages,
         uint256[] memory periods
-    ) external onlyOwner whenNotPaused {
+    ) external onlyRole(ADMIN_ROLE) whenNotPaused {
         require(lp != address(0), "Invalid LP address");
         require(amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
         require(percentages.length > 0, "Percentages must not be empty");
@@ -124,7 +134,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Create a new cash call (Admin only)
-    function createCashCall(uint256 amount, uint256 callInterval) external onlyOwner whenNotPaused {
+    function createCashCall(uint256 amount, uint256 callInterval) external onlyRole(ADMIN_ROLE) whenNotPaused {
         require(amount > 0, "Cash call amount must be greater than zero");
         require(callInterval > 0, "Call interval must be greater than zero");
 
@@ -158,7 +168,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Execute a cash call (Admin only)
-    function executeCashCall(uint256 callId) external onlyOwner whenNotPaused {
+    function executeCashCall(uint256 callId) external onlyRole(ADMIN_ROLE) whenNotPaused {
         CashCall storage call = cashCalls[callId];
         require(call.amount > 0, "Cash call does not exist");
         require(!call.executed, "Cash call already executed");
@@ -170,7 +180,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Apply penalties for missed deadlines
-    function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount, bool revokeAccess) external onlyOwner whenNotPaused {
+    function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount, bool revokeAccess) external onlyRole(ADMIN_ROLE) whenNotPaused {
         LPData storage lpInfo = lpData[lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
 
@@ -193,7 +203,7 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Set the minimun amount of commitment
-    function setMinCommitmentAmountUSD(uint256 minAmount) external onlyOwner whenNotPaused {
+    function setMinCommitmentAmountUSD(uint256 minAmount) external onlyRole(ADMIN_ROLE) whenNotPaused {
         require(minAmount > 0, "Minimum commitment amount must be greater than zero");
         minCommitmentAmountUSD = minAmount;
     }
@@ -219,20 +229,68 @@ contract LPManagement is Ownable(msg.sender), Pausable, ReentrancyGuard {
     }
 
     // Pause the contract (Admin only)
-    function pause() external onlyOwner {
+    function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
     // Unpause the contract (Admin only)
-    function unpause() external onlyOwner {
+    function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
 
     // Withdraw Ether from the contract (Admin only)
-    function withdraw(uint256 amount) external onlyOwner whenNotPaused nonReentrant {
+    function withdraw(uint256 amount, address to) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
         require(amount <= address(this).balance, "Insufficient balance in contract");
-        payable(owner()).transfer(amount);
-        emit Withdrawal(owner(), amount);
+        payable(to).transfer(amount);
+        emit Withdrawal(to, amount);
+    }
+
+    // Add a new admin
+    function addAdmin(address account) external onlyRole(ADMIN_ROLE) {
+        require(account != address(0), "Invalid address");
+        grantRole(ADMIN_ROLE, account);
+        emit AdminAdded(account);
+    }
+
+    // Remove an admin
+    function removeAdmin(address account) external onlyRole(ADMIN_ROLE) {
+        require(account != address(0), "Invalid address");
+        require(hasRole(ADMIN_ROLE, account), "Address is not an admin");
+        uint256 adminCount = getAdminCount();
+        require(adminCount > 1, "Cannot remove the last admin");
+
+        revokeRole(ADMIN_ROLE, account);
+        emit AdminRemoved(account);
+    }
+
+    // Get the list of admins
+    function getAdmins() external view returns (address[] memory) {
+        uint256 adminCount = getAdminCount();
+        address[] memory admins = new address[](adminCount);
+
+        uint256 index = 0;
+        for (uint256 i = 0; i < 2**256 - 1; i++) {
+            address account = address(uint160(i));
+            if (hasRole(ADMIN_ROLE, account)) {
+                admins[index] = account;
+                index++;
+            }
+            if (index == adminCount) {
+                break;
+            }
+        }
+
+        return admins;
+    }
+
+    // Get the number of admins
+    function getAdminCount() public view returns (uint256 count) {
+        for (uint256 i = 0; i < 2**256 - 1; i++) {
+            address account = address(uint160(i));
+            if (hasRole(ADMIN_ROLE, account)) {
+                count++;
+            }
+        }
     }
 
     // Fallback function to receive Ether
