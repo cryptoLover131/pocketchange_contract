@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-contract LPManagement is AccessControl, Pausable, ReentrancyGuard {
-    // Define an admin role identifier
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+contract LPManagement is Pausable, ReentrancyGuard {
+    // Store the list of admins
+    address[] private admins;
+    mapping(address => bool) private isAdmin;
+
+    // Address of the default admin (can only add/remove admins and set new default admin)
+    address private defaultAdmin;
+
     // Aggregator for ETH-USD price feed
     AggregatorV3Interface internal ethUsdPriceFeed;
 
@@ -16,15 +20,7 @@ contract LPManagement is AccessControl, Pausable, ReentrancyGuard {
     struct LPData {
         uint256 commitmentAmount;  // Total commitment by the LP
         uint256 totalPaid;         // Amount already paid
-        uint256 remainingCommitment; // Remaining amount to be paid
-        uint256 commitmentPeriod; // Commitment Period
-        mapping(uint8 => uint256) tranchePayments;    // Payments made per tranche
-    }
-
-    // Struct to store tranche details
-    struct TrancheDetails {
-        uint256 percentage; // Percentage of the commitment for this tranche
-        uint256 deadline;     // Period (in seconds) after which this tranche is due
+        uint256 endTime; // Commitment Period
     }
 
     uint256 public minCommitmentAmountUSD = 1000 * 10**18;
@@ -32,38 +28,48 @@ contract LPManagement is AccessControl, Pausable, ReentrancyGuard {
     // Struct to store Cash Call data
     struct CashCall {
         uint256 amount;   // Amount requested in the cash call
-        uint256 callInterval;  // Call interval duration
+        uint256 paidAmount;   // Amount paid towards the cash call
+        uint256 deadline;  // Call interval duration
         bool executed;    // Whether the cash call has been executed
     }
 
     // Mappings
     mapping(address => LPData) public lpData;         // LP data by address
-    mapping(address => TrancheDetails[]) public lpTranches;   // Tranche details per LP
-    mapping(uint256 => CashCall) public cashCalls;    // Cash calls by ID
-
-    uint256 public totalCashCalls; // Total number of cash calls created
+    mapping(address => CashCall[]) public cashCalls;    // Cash calls by LP address
 
     // Events
-    event CommitmentSet(address indexed lp, uint256 amountETH);
-    event PaymentMade(address indexed lp, uint256 amount, uint8 tranche);
-    event CashCallCreated(uint256 indexed callId, uint256 amount, uint256 callInterval);
-    event CashCallExecuted(uint256 indexed callId);
+    event CommitmentSet(address indexed lp, uint256 amountETH, uint256 endTime);
+    event PaymentMade(address indexed lp, uint256 amount, uint256 callId);
+    event CashCallCreated(uint256 callId, uint256 amount, uint256 deadline);
+    event CashCallExecuted(address indexed lp, uint256 callId);
+    event CashCallExecutionReverted(address indexed lp, uint256 callId);
     event PenaltyApplied(address indexed lp, uint256 penaltyAmount);
-    event TranchesForfeited(address indexed lp);
     event AccessRevoked(address indexed lp);
     event Withdrawal(address indexed to, uint256 amount);
     event AdminAdded(address indexed account);
     event AdminRemoved(address indexed account);
+    event DefaultAdminChanged(address indexed oldAdmin, address indexed newAdmin);
 
-    constructor(address _aggregatorAddress) {
+    constructor(address _aggregatorAddress, address _defaultAdmin) {
         require(_aggregatorAddress != address(0), "Invalid aggregator address");
+        require(_defaultAdmin != address(0), "Invalid default admin address");
+        
         ethUsdPriceFeed = AggregatorV3Interface(_aggregatorAddress);
+        defaultAdmin = _defaultAdmin;
 
-        // Grant the deployer the admin role
-        _grantRole(ADMIN_ROLE, msg.sender);
+        // Initially, set the default admin as the only admin
+        addAdmin(_defaultAdmin);
+    }
 
-        // Grant the deployer the default admin role, which allows managing roles
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+    // Check if sender is the default admin
+    modifier onlyDefaultAdmin() {
+        require(msg.sender == defaultAdmin, "Not authorized: Only default admin can perform this action");
+        _;
+    }
+
+    // Check if sender is an admin
+    function isAdminRole() public view returns (bool) {
+        return isAdmin[msg.sender];
     }
 
     // Get ETH-USD exchange rate
@@ -77,220 +83,176 @@ contract LPManagement is AccessControl, Pausable, ReentrancyGuard {
 
     // Set commitment for a Limited Partner (Admin only)
     function setCommitment(
-        address lp,
-        uint256 amountETH,
-        uint8[] memory percentages,
-        uint256[] memory periods
-    ) external onlyRole(ADMIN_ROLE) whenNotPaused {
-        require(lp != address(0), "Invalid LP address");
-        require(amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
-        require(percentages.length > 0, "Percentages must not be empty");
-        require(percentages.length == periods.length, "Percentages and periods must match");
-
-        uint256 totalPercentage;
-        for (uint8 i = 0; i < percentages.length; i++) {
-            totalPercentage += percentages[i];
-        }
-        require(totalPercentage == 100, "Total percentage must equal 100");
+        address _lp,
+        uint256 _amountETH,
+        uint256 _endTime
+    ) external whenNotPaused {
+        require(isAdminRole(), "Not authorized");
+        require(_lp != address(0), "Invalid LP address");
+        require(!isLP(_lp), "LP already exists");
+        require(_amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
+        require(_endTime > block.timestamp, "End Time must be later than the current time.");
 
         // Initialize LP data
-        LPData storage lpInfo = lpData[lp];
-        lpInfo.commitmentAmount = amountETH;
+        LPData storage lpInfo = lpData[_lp];
+        lpInfo.commitmentAmount = _amountETH;
         lpInfo.totalPaid = 0;
-        lpInfo.remainingCommitment = amountETH;
-        lpInfo.commitmentPeriod = periods[periods.length -1];
-        // Set tranche details
-        delete lpTranches[lp]; // Reset existing tranche details for the LP
-        for (uint8 i = 0; i < percentages.length; i++) {
-            lpTranches[lp].push(TrancheDetails({
-                percentage: percentages[i],
-                deadline: block.timestamp + (periods[i] * 1 days)
-            }));
-        }
+        lpInfo.endTime = _endTime;
 
-        emit CommitmentSet(lp, amountETH);
-    }
-
-    // Get all tranches periods and amounts
-    function getLPTranches(address lp) external view returns (uint256[] memory trancheDeadlines, uint256[] memory trancheAmounts) {
-        TrancheDetails[] storage tranches = lpTranches[lp];
-        LPData storage lpInfo = lpData[lp];
-        require(lpInfo.commitmentAmount > 0, "Invalid LP");
-
-        uint256 trancheCount = tranches.length;
-
-        trancheDeadlines = new uint256[](trancheCount);
-        trancheAmounts = new uint256[](trancheCount);
-
-        for (uint8 i = 0; i < trancheCount; i++) {
-            // Get tranche period
-            trancheDeadlines[i] = tranches[i].deadline;
-
-            // Calculate tranche amount based on the percentage
-            trancheAmounts[i] = (lpInfo.commitmentAmount * tranches[i].percentage) / 100;
-        }
-
-        return (trancheDeadlines, trancheAmounts);
+        emit CommitmentSet(_lp, _amountETH, _endTime);
     }
 
     // Create a new cash call (Admin only)
-    function createCashCall(uint256 amount, uint256 callInterval) external onlyRole(ADMIN_ROLE) whenNotPaused {
-        require(amount > 0, "Cash call amount must be greater than zero");
-        require(callInterval > 0, "Call interval must be greater than zero");
+    function createCashCall(address _lp, uint256 _amount, uint256 _deadline) external whenNotPaused {
+        require(isAdminRole(), "Not authorized");
+        require(isLP(_lp), "Not an LP!");
+        require(_amount > 0, "Cash call amount must be greater than zero");
+        require(_deadline > block.timestamp && _deadline <= lpData[_lp].endTime, "Deadline must be later than the current time.");
+        // Check if there are existing cash calls and compare with the last one
+        CashCall[] storage existingCalls = cashCalls[_lp];
+        if (existingCalls.length > 0) {
+            uint256 lastDeadline = existingCalls[existingCalls.length - 1].deadline;
+            require(_deadline > lastDeadline, "New deadline must be after the last deadline");
+        }
 
-        cashCalls[totalCashCalls] = CashCall({
-            amount: amount,
-            callInterval: callInterval,
-            executed: false
-        });
-
-        emit CashCallCreated(totalCashCalls, amount, callInterval);
-        totalCashCalls++;
+        // Add the new CashCall
+        cashCalls[_lp].push(CashCall(_amount, 0, _deadline, false));  // Add the new CashCall with initial values
+        emit CashCallCreated(existingCalls.length, _amount, _deadline);
     }
 
-    // Make a payment as an LP
-    function makePayment(uint8 tranche) external payable whenNotPaused nonReentrant {
-        LPData storage lp = lpData[msg.sender];
-        require(lp.commitmentAmount > 0, "You are not an LP");
-        require(tranche < lpTranches[msg.sender].length, "Invalid tranche");
+    // Make a payment (LP only)
+    function makePayment(address _lp, uint256 _callId) external payable whenNotPaused nonReentrant {
+        require(isLP(_lp), "You are not an LP");
 
-        TrancheDetails memory trancheDetails = lpTranches[msg.sender][tranche];
-        uint256 trancheCommitment = (lp.commitmentAmount * trancheDetails.percentage) / 100;
+        // Retrieve the cash call for the LP and call ID
+        CashCall storage cashCall = cashCalls[_lp][_callId];
+        require(cashCall.amount > 0, "Cash call does not exist");
 
-        require(lp.tranchePayments[tranche] + msg.value <= trancheCommitment, "Overpayment not allowed");
-        require(block.timestamp <= trancheDetails.deadline, "Tranche date was expired");
+        // Check if the cash call has been executed or if the deadline has passed
+        require(!cashCall.executed, "Cash call already executed");
 
-        lp.totalPaid += msg.value;
-        lp.remainingCommitment -= msg.value;
-        lp.tranchePayments[tranche] += msg.value;
+        // Update the paid amount for the cash call
+        cashCall.paidAmount += msg.value;
 
-        emit PaymentMade(msg.sender, msg.value, tranche);
+        // Update LP Data
+        lpData[msg.sender].totalPaid += msg.value;
+
+        // Emit an event to notify that payment has been made
+        emit PaymentMade(_lp, msg.value, _callId);
     }
 
     // Execute a cash call (Admin only)
-    function executeCashCall(uint256 callId) external onlyRole(ADMIN_ROLE) whenNotPaused {
-        CashCall storage call = cashCalls[callId];
+    function executeCashCall(address _lp, uint256 _callId) external whenNotPaused {
+        require(isAdminRole(), "Not authorized");
+        CashCall storage call = cashCalls[_lp][_callId];
         require(call.amount > 0, "Cash call does not exist");
         require(!call.executed, "Cash call already executed");
-        require(block.timestamp >= call.callInterval, "Cash call is not yet due");
 
+        // Execute the cash call logic
         call.executed = true;
 
-        emit CashCallExecuted(callId);
+        emit CashCallExecuted(_lp, _callId);
     }
 
-    // Apply penalties for missed deadlines
-    function applyPenalty(address lp, uint8 tranche, uint256 penaltyAmount, bool revokeAccess) external onlyRole(ADMIN_ROLE) whenNotPaused {
-        LPData storage lpInfo = lpData[lp];
+    // Revert the execution of a cash call (Admin only)
+    function revertExecution(address _lp, uint256 _callId) external whenNotPaused {
+        require(isAdminRole(), "Not authorized");
+        require(isLP(_lp), "Not an LP!");
+        CashCall storage call = cashCalls[_lp][_callId];
+        require(call.amount > 0, "Cash call does not exist");
+        require(call.executed, "Cash call not executed yet");
+
+        // Revert the executed flag back to false
+        call.executed = false;
+
+        emit CashCallExecutionReverted(_lp, _callId);
+    }
+
+    // Apply penalties for missed deadlines (Admin only)
+    function applyPenalty(address _lp, uint256 _penaltyAmount, bool _revokeAccess) external whenNotPaused {
+        require(isAdminRole(), "Not authorized");
+        LPData storage lpInfo = lpData[_lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
 
-        // Forfeit prior tranches
-        for (uint8 i = 0; i < tranche; i++) {
-            lpInfo.tranchePayments[i] = 0;
-        }
-        emit TranchesForfeited(lp);
-
         // Apply late fee
-        lpInfo.remainingCommitment += penaltyAmount;
-        emit PenaltyApplied(lp, penaltyAmount);
+        lpInfo.totalPaid -= _penaltyAmount;
+        emit PenaltyApplied(_lp, _penaltyAmount);
 
         // Revoke access if applicable
-        if (revokeAccess) {
+        if (_revokeAccess) {
             lpInfo.commitmentAmount = 0;
-            lpInfo.remainingCommitment = 0;
-            emit AccessRevoked(lp);
+            lpInfo.totalPaid = 0;
+            emit AccessRevoked(_lp);
         }
     }
 
-    // Set the minimun amount of commitment
-    function setMinCommitmentAmountUSD(uint256 minAmount) external onlyRole(ADMIN_ROLE) whenNotPaused {
-        require(minAmount > 0, "Minimum commitment amount must be greater than zero");
-        minCommitmentAmountUSD = minAmount;
+    // Add a new admin (only default admin)
+    function addAdmin(address _account) public onlyDefaultAdmin {
+        require(_account != address(0), "Invalid address");
+        require(!isAdmin[_account], "Already an admin");
+
+        // Add the new admin
+        admins.push(_account);
+        isAdmin[_account] = true;
+
+        emit AdminAdded(_account);
     }
 
-    // Get next tranche data
-    function getNextTranche(address lp) external view returns (uint256 nextPercentage, uint256 nextDeadline) {
-        TrancheDetails[] storage tranches = lpTranches[lp];
-        require(tranches.length > 0, "No tranches set for this LP");
+    // Remove an admin (only default admin)
+    function removeAdmin(address _account) public onlyDefaultAdmin {
+        require(isAdmin[_account], "Not an admin");
 
-        for (uint8 i = 0; i < tranches.length; i++) {
-            if (block.timestamp < tranches[i].deadline) {
-                return (tranches[i].percentage, tranches[i].deadline);
-            }
-        }
+        // Prevent removing the last admin
+        require(admins.length > 1, "Cannot remove the last admin");
 
-        revert("No upcoming tranche found");
-    }
+        // Remove admin
+        isAdmin[_account] = false;
 
-    // Check if a cash call is due
-    function isCallDue(uint256 callId) external view whenNotPaused returns (bool) {
-        CashCall storage call = cashCalls[callId];
-        return block.timestamp >= call.callInterval && !call.executed;
-    }
-
-    // Pause the contract (Admin only)
-    function pause() external onlyRole(ADMIN_ROLE) {
-        _pause();
-    }
-
-    // Unpause the contract (Admin only)
-    function unpause() external onlyRole(ADMIN_ROLE) {
-        _unpause();
-    }
-
-    // Withdraw Ether from the contract (Admin only)
-    function withdraw(uint256 amount, address to) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
-        require(amount <= address(this).balance, "Insufficient balance in contract");
-        payable(to).transfer(amount);
-        emit Withdrawal(to, amount);
-    }
-
-    // Add a new admin
-    function addAdmin(address account) external onlyRole(ADMIN_ROLE) {
-        require(account != address(0), "Invalid address");
-        grantRole(ADMIN_ROLE, account);
-        emit AdminAdded(account);
-    }
-
-    // Remove an admin
-    function removeAdmin(address account) external onlyRole(ADMIN_ROLE) {
-        require(account != address(0), "Invalid address");
-        require(hasRole(ADMIN_ROLE, account), "Address is not an admin");
-        uint256 adminCount = getAdminCount();
-        require(adminCount > 1, "Cannot remove the last admin");
-
-        revokeRole(ADMIN_ROLE, account);
-        emit AdminRemoved(account);
-    }
-
-    // Get the list of admins
-    function getAdmins() external view returns (address[] memory) {
-        uint256 adminCount = getAdminCount();
-        address[] memory admins = new address[](adminCount);
-
-        uint256 index = 0;
-        for (uint256 i = 0; i < 2**256 - 1; i++) {
-            address account = address(uint160(i));
-            if (hasRole(ADMIN_ROLE, account)) {
-                admins[index] = account;
-                index++;
-            }
-            if (index == adminCount) {
+        // Remove from the admins array
+        for (uint256 i = 0; i < admins.length; i++) {
+            if (admins[i] == _account) {
+                admins[i] = admins[admins.length - 1];
+                admins.pop();
                 break;
             }
         }
 
-        return admins;
+        emit AdminRemoved(_account);
     }
 
-    // Get the number of admins
-    function getAdminCount() public view returns (uint256 count) {
-        for (uint256 i = 0; i < 2**256 - 1; i++) {
-            address account = address(uint160(i));
-            if (hasRole(ADMIN_ROLE, account)) {
-                count++;
-            }
-        }
+    // Set a new default admin (only the current default admin)
+    function setDefaultAdmin(address _newDefaultAdmin) public onlyDefaultAdmin {
+        require(_newDefaultAdmin != address(0), "Invalid address for new default admin");
+
+        address oldAdmin = defaultAdmin;
+        defaultAdmin = _newDefaultAdmin;
+
+        emit DefaultAdminChanged(oldAdmin, _newDefaultAdmin);
+    }
+
+    // Check if an LP address exists in lpData
+    function isLP(address _lp) public view returns (bool) {
+        return lpData[_lp].commitmentAmount > 0;
+    }
+
+    // Pause the contract (Admin only)
+    function pause() external {
+        require(isAdminRole(), "Not authorized");
+        _pause();
+    }
+
+    // Unpause the contract (Admin only)
+    function unpause() external {
+        require(isAdminRole(), "Not authorized");
+        _unpause();
+    }
+
+    // Withdraw Ether from the contract (Admin only)
+    function withdraw(uint256 _amount, address _to) external nonReentrant {
+        require(isAdminRole(), "Not authorized");
+        require(_amount <= address(this).balance, "Insufficient balance in contract");
+        payable(_to).transfer(_amount);
+        emit Withdrawal(_to, _amount);
     }
 
     // Fallback function to receive Ether
