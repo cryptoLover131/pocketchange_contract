@@ -117,6 +117,11 @@ contract LPManagement is Pausable, ReentrancyGuard {
         emit CashCallCreated(existingCalls.length, _amount, _deadline);
     }
 
+    // Function to get all cash calls for a specific LP
+    function getCashCalls(address _lp) external view returns (CashCall[] memory) {
+        return cashCalls[_lp];
+    }
+
     // Make a payment (LP only)
     function makePayment(address _lp, uint256 _callId) external payable whenNotPaused nonReentrant {
         require(isLP(_lp), "You are not an LP");
@@ -230,7 +235,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Check if an LP address exists in lpData
-    function isLP(address _lp) public view returns (bool) {
+    function isLP(address _lp) private view returns (bool) {
         return lpData[_lp].commitmentAmount > 0;
     }
 
