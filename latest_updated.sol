@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 contract LPManagement is Pausable, ReentrancyGuard {
-    // Store the list of admins
-    address[] private admins;
-    mapping(address => bool) private isAdmin;
-
-    // Address of the default admin (can only add/remove admins and set new default admin)
-    address private defaultAdmin;
+    // Store the list of admins and default admin (public for reading)
+    address[] public admins;
+    mapping(address => bool) public isAdmin;
+    address public defaultAdmin;
 
     // Aggregator for ETH-USD price feed
     AggregatorV3Interface internal ethUsdPriceFeed;
@@ -67,9 +65,10 @@ contract LPManagement is Pausable, ReentrancyGuard {
         _;
     }
 
-    // Check if sender is an admin
-    function isAdminRole() public view returns (bool) {
-        return isAdmin[msg.sender];
+    // Check if sender is any admin (including default admin)
+    modifier onlyAdmin() {
+        require(isAdmin[msg.sender], "Not authorized: Only admin can perform this action");
+        _;
     }
 
     // Get ETH-USD exchange rate
@@ -86,8 +85,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
         address _lp,
         uint256 _amountETH,
         uint256 _endTime
-    ) external whenNotPaused {
-        require(isAdminRole(), "Not authorized");
+    ) external whenNotPaused onlyAdmin {
         require(_lp != address(0), "Invalid LP address");
         require(!isLP(_lp), "LP already exists");
         require(_amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
@@ -103,8 +101,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Create a new cash call (Admin only)
-    function createCashCall(address _lp, uint256 _amount, uint256 _deadline) external whenNotPaused {
-        require(isAdminRole(), "Not authorized");
+    function createCashCall(address _lp, uint256 _amount, uint256 _deadline) external whenNotPaused onlyAdmin {
         require(isLP(_lp), "Not an LP!");
         require(_amount > 0, "Cash call amount must be greater than zero");
         require(_deadline > block.timestamp && _deadline <= lpData[_lp].endTime, "Deadline must be later than the current time.");
@@ -142,8 +139,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Execute a cash call (Admin only)
-    function executeCashCall(address _lp, uint256 _callId) external whenNotPaused {
-        require(isAdminRole(), "Not authorized");
+    function executeCashCall(address _lp, uint256 _callId) external whenNotPaused onlyAdmin {
         CashCall storage call = cashCalls[_lp][_callId];
         require(call.amount > 0, "Cash call does not exist");
         require(!call.executed, "Cash call already executed");
@@ -155,8 +151,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Revert the execution of a cash call (Admin only)
-    function revertExecution(address _lp, uint256 _callId) external whenNotPaused {
-        require(isAdminRole(), "Not authorized");
+    function revertExecution(address _lp, uint256 _callId) external whenNotPaused onlyAdmin {
         require(isLP(_lp), "Not an LP!");
         CashCall storage call = cashCalls[_lp][_callId];
         require(call.amount > 0, "Cash call does not exist");
@@ -169,8 +164,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Apply penalties for missed deadlines (Admin only)
-    function applyPenalty(address _lp, uint256 _penaltyAmount, bool _revokeAccess) external whenNotPaused {
-        require(isAdminRole(), "Not authorized");
+    function applyPenalty(address _lp, uint256 _penaltyAmount, bool _revokeAccess) external whenNotPaused onlyAdmin {
         LPData storage lpInfo = lpData[_lp];
         require(lpInfo.commitmentAmount > 0, "Invalid LP");
 
@@ -230,26 +224,28 @@ contract LPManagement is Pausable, ReentrancyGuard {
         emit DefaultAdminChanged(oldAdmin, _newDefaultAdmin);
     }
 
+    // Function to get the list of admins
+    function getAdmins() public view returns (address[] memory) {
+        return admins;
+    }
+
     // Check if an LP address exists in lpData
     function isLP(address _lp) public view returns (bool) {
         return lpData[_lp].commitmentAmount > 0;
     }
 
     // Pause the contract (Admin only)
-    function pause() external {
-        require(isAdminRole(), "Not authorized");
+    function pause() external onlyAdmin {
         _pause();
     }
 
     // Unpause the contract (Admin only)
-    function unpause() external {
-        require(isAdminRole(), "Not authorized");
+    function unpause() external onlyAdmin {
         _unpause();
     }
 
     // Withdraw Ether from the contract (Admin only)
-    function withdraw(uint256 _amount, address _to) external nonReentrant {
-        require(isAdminRole(), "Not authorized");
+    function withdraw(uint256 _amount, address _to) external onlyAdmin nonReentrant {
         require(_amount <= address(this).balance, "Insufficient balance in contract");
         payable(_to).transfer(_amount);
         emit Withdrawal(_to, _amount);
