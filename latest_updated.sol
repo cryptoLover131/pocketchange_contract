@@ -230,9 +230,9 @@ contract LPManagement is Pausable, ReentrancyGuard {
         require(_newDefaultAdmin != address(0), "Invalid address for new default admin");
 
         address oldAdmin = defaultAdmin;
-        defaultAdmin = _newDefaultAdmin;
-
         addAdmin(_newDefaultAdmin);
+
+        defaultAdmin = _newDefaultAdmin;
 
         emit DefaultAdminChanged(oldAdmin, _newDefaultAdmin);
     }
