@@ -81,7 +81,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
     }
 
     // Function to set the minimum commitment amount in USD (only default admin)
-    function setMinCommitmentAmountUSD(uint256 _minCommitmentAmountUSD) external onlyDefaultAdmin {
+    function setMinCommitmentAmountUSD(uint256 _minCommitmentAmountUSD) external onlyAdmin {
         require(_minCommitmentAmountUSD > 0, "Minimum commitment amount must be greater than zero");
         minCommitmentAmountUSD = _minCommitmentAmountUSD;
     }
