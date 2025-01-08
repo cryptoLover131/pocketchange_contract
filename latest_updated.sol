@@ -80,6 +80,12 @@ contract LPManagement is Pausable, ReentrancyGuard {
         return uint256(ethUsdPrice) * 1e10; // Adjust to 18 decimals for consistency
     }
 
+    // Function to set the minimum commitment amount in USD (only default admin)
+    function setMinCommitmentAmountUSD(uint256 _minCommitmentAmountUSD) external onlyDefaultAdmin {
+        require(_minCommitmentAmountUSD > 0, "Minimum commitment amount must be greater than zero");
+        minCommitmentAmountUSD = _minCommitmentAmountUSD;
+    }
+
     // Set commitment for a Limited Partner (Admin only)
     function setCommitment(
         address _lp,
@@ -225,7 +231,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
 
         address oldAdmin = defaultAdmin;
         defaultAdmin = _newDefaultAdmin;
-        
+
         addAdmin(_newDefaultAdmin);
 
         emit DefaultAdminChanged(oldAdmin, _newDefaultAdmin);
