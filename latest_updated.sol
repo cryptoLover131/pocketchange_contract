@@ -38,7 +38,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
 
     // Events
     event CommitmentSet(address indexed lp, uint256 amountETH, uint256 endTime);
-    event PaymentMade(address indexed lp, uint256 amount, uint256 callId);
+    event PaymentMade(address indexed lp, string name, uint256 amount, uint256 callId);
     event CashCallCreated(uint256 callId, uint256 amount, uint256 deadline);
     event CashCallExecuted(address indexed lp, uint256 callId);
     event CashCallExecutionReverted(address indexed lp, uint256 callId);
