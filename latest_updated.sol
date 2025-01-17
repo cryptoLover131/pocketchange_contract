@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -16,6 +16,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
 
     // Struct to store Limited Partner data
     struct LPData {
+        string name;               // Name of the LP
         uint256 commitmentAmount;  // Total commitment by the LP
         uint256 totalPaid;         // Amount already paid
         uint256 endTime; // Commitment Period
@@ -88,17 +89,20 @@ contract LPManagement is Pausable, ReentrancyGuard {
 
     // Set commitment for a Limited Partner (Admin only)
     function setCommitment(
+        string memory _name,
         address _lp,
         uint256 _amountETH,
         uint256 _endTime
     ) external whenNotPaused onlyAdmin {
         require(_lp != address(0), "Invalid LP address");
         require(!isLP(_lp), "LP already exists");
+        require(bytes(_name).length > 0, "Name cannot be empty");
         require(_amountETH * getETHUSDCExchangeRate() >= minCommitmentAmountUSD * 10**18, "Commitment amount must be greater than minimum amount");
         require(_endTime > block.timestamp, "End Time must be later than the current time.");
 
         // Initialize LP data
         LPData storage lpInfo = lpData[_lp];
+        lpInfo.name = _name;
         lpInfo.commitmentAmount = _amountETH;
         lpInfo.totalPaid = 0;
         lpInfo.endTime = _endTime;
@@ -146,7 +150,7 @@ contract LPManagement is Pausable, ReentrancyGuard {
         lpData[msg.sender].totalPaid += msg.value;
 
         // Emit an event to notify that payment has been made
-        emit PaymentMade(_lp, msg.value, _callId);
+        emit PaymentMade(_lp, lpData[msg.sender].name, msg.value, _callId);
     }
 
     // Execute a cash call (Admin only)
